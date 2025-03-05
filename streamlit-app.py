@@ -160,7 +160,7 @@ def main():
 
     # Get maintenance schedule data
     @st.cache_data(ttl=60)  # Short cache time since this depends on sliders
-    def get_schedule_data(_session, airline, downtime_weight, urgency_weight, resource_weight):
+    def get_schedule_data(_session, airline, downtime_weight=5, urgency_weight=7, resource_weight=3):
         try:
             # First check if the view exists with a simple count query
             check_query = f"""
