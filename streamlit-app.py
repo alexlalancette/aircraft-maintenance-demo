@@ -3,7 +3,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from snowflake.snowpark import Session
-from snowflake_connection_helper import get_snowflake_session
 import json
 import datetime
 
