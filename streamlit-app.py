@@ -17,10 +17,15 @@ st.set_page_config(
 
 # Connect to Snowflake
 # You'd have connection parameters stored securely
-def get_snowflake_session():
+def get_snowflake_session(force_refresh=False):
     """
-    Create a Snowflake session using environment variables
-    Recommended for secure credential management
+    Create a Snowflake session using environment variables with automatic refresh
+    
+    Args:
+        force_refresh (bool): Force creation of a new session
+        
+    Returns:
+        Session: Snowflake session
     """
     # Load environment variables
     load_dotenv()
@@ -49,17 +54,17 @@ def get_snowflake_session():
         return None
 
 
-# Add caching for session creation
-@st.cache_resource
+# Token refresh mechanism
+@st.cache_resource(ttl=3600)  # Refresh session every hour
 def create_snowflake_session():
-    """Cached Snowflake session creation"""
+    """Cached Snowflake session creation with time-based expiration"""
     return get_snowflake_session()
 
 
-# Error handling wrapper for database queries
+# Error handling wrapper for database queries with auto-refresh
 def safe_snowflake_query(session, query):
     """
-    Safely execute Snowflake queries with error handling
+    Safely execute Snowflake queries with error handling and session refresh
     
     Args:
         session (Session): Snowflake session
@@ -71,8 +76,26 @@ def safe_snowflake_query(session, query):
     try:
         return session.sql(query).to_pandas()
     except Exception as e:
-        st.error(f"Database query failed: {e}")
-        return pd.DataFrame()
+        error_message = str(e)
+        # Check if the error is related to authentication token expiration
+        if "Authentication token has expired" in error_message or "authentication" in error_message.lower():
+            st.warning("Refreshing Snowflake session... Please wait.")
+            
+            # Clear the cached session to force creation of a new one
+            create_snowflake_session.clear()
+            
+            # Get a fresh session
+            new_session = create_snowflake_session()
+            
+            # Retry the query with the new session
+            try:
+                return new_session.sql(query).to_pandas()
+            except Exception as retry_error:
+                st.error(f"Failed to execute query after session refresh: {retry_error}")
+                return pd.DataFrame()
+        else:
+            st.error(f"Database query failed: {e}")
+            return pd.DataFrame()
 
 
 def main():
