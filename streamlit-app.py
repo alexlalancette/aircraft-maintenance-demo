@@ -359,8 +359,10 @@ def main():
                     xaxis_title="Date",
                     yaxis_title="Technicians Needed",
                     yaxis2=dict(
-                        title="Maintenance Events",
-                        titlefont=dict(color='#ff7f0e'),
+                        title=dict(
+                            text="Maintenance Events",
+                            font=dict(color='#ff7f0e')
+                        ),
                         tickfont=dict(color='#ff7f0e'),
                         overlaying='y',
                         side='right'
