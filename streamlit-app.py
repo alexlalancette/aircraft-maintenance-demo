@@ -91,7 +91,7 @@ def main():
     
     # Cache common queries
     @st.cache_data(ttl=600)
-    def get_airlines(session):
+    def get_airlines(_session):
         return session.table("platinum.airline_dashboard_kpis").select("airline_name").to_pandas()
     
     airlines = get_airlines(session)
@@ -112,7 +112,7 @@ def main():
     st.header("Fleet Health Overview")
     
     @st.cache_data(ttl=600)
-    def get_kpi_data(session, airline):
+    def get_kpi_data(_session, airline):
         kpi_query = f"""
             SELECT * FROM platinum.airline_dashboard_kpis
             WHERE airline_name = '{airline}'
@@ -136,7 +136,7 @@ def main():
     st.header("Fleet Health Status")
     
     @st.cache_data(ttl=600)
-    def get_fleet_data(session, airline):
+    def get_fleet_data(_session, airline):
         fleet_query = f"""
             SELECT aircraft_registration, aircraft_model, health_score, aircraft_health_status,
                 critical_components, warning_components, average_component_wear
@@ -176,7 +176,7 @@ def main():
     )
     
     @st.cache_data(ttl=600)
-    def get_risk_data(session, airline, component_filter):
+    def get_risk_data(_session, airline, component_filter):
         # Enhanced query for risk matrix
         risk_query = f"""
             SELECT 
@@ -286,7 +286,7 @@ def main():
     st.header("Maintenance ROI & Cost Savings Analysis")
 
     @st.cache_data(ttl=600)
-    def get_cost_data(session, airline):
+    def get_cost_data(_session, airline):
         # Get more detailed cost data with time dimension
         cost_query = f"""
             SELECT
@@ -418,7 +418,7 @@ def main():
 
     # Call the stored procedure to get an optimized maintenance schedule
     @st.cache_data(ttl=60)  # Short cache time since this depends on sliders
-    def get_schedule_data(session, airline, downtime_weight, urgency_weight, resource_weight):
+    def get_schedule_data(_session, airline, downtime_weight, urgency_weight, resource_weight):
         schedule_query = f"""
             CALL platinum.generate_optimized_maintenance_schedule(
                 '{airline}',
@@ -583,7 +583,7 @@ def main():
 
     # Query for anomaly data with enhanced fields
     @st.cache_data(ttl=600)
-    def get_anomaly_data(session, airline, from_date, component_type, sensor_type):
+    def get_anomaly_data(_session, airline, from_date, component_type, sensor_type):
         anomaly_query = f"""
             WITH base_data AS (
                 SELECT 
