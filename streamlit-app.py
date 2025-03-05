@@ -114,7 +114,7 @@ def main():
     
     # Cache common queries
     @st.cache_data(ttl=600)
-    def get_airlines(_session):
+    def get_airlines(session):
         return session.table("platinum.airline_dashboard_kpis").select("airline_name").to_pandas()
     
     airlines = get_airlines(session)
@@ -135,7 +135,7 @@ def main():
     st.header("Fleet Health Overview")
     
     @st.cache_data(ttl=600)
-    def get_kpi_data(_session, airline):
+    def get_kpi_data(session, airline):
         kpi_query = f"""
             SELECT * FROM platinum.airline_dashboard_kpis
             WHERE airline_name = '{airline}'
@@ -159,7 +159,7 @@ def main():
     st.header("Fleet Health Status")
     
     @st.cache_data(ttl=600)
-    def get_fleet_data(_session, airline):
+    def get_fleet_data(session, airline):
         fleet_query = f"""
             SELECT aircraft_registration, aircraft_model, health_score, aircraft_health_status,
                 critical_components, warning_components, average_component_wear
@@ -199,7 +199,7 @@ def main():
     )
     
     @st.cache_data(ttl=600)
-    def get_risk_data(_session, airline, component_filter):
+    def get_risk_data(session, airline, component_filter):
         # Enhanced query for risk matrix
         risk_query = f"""
             SELECT 
@@ -279,11 +279,35 @@ def main():
         hoverlabel=dict(bgcolor="white", font_size=12)
     )
     
-    # Show only component names for high risk components
+    # Create text array for component names (only for Critical Risk)
+    risk_data['display_name'] = ''
+    risk_data.loc[risk_data['RISK_CATEGORY'] == 'Critical Risk', 'display_name'] = risk_data.loc[risk_data['RISK_CATEGORY'] == 'Critical Risk', 'COMPONENT_NAME']
+    
+    # Update scatter with pre-populated text
+    fig_risk = px.scatter(
+        risk_data,
+        x="FAILURE_PROBABILITY",
+        y="OPERATIONAL_IMPACT",
+        color="RISK_CATEGORY",
+        size="RISK_SCORE",
+        hover_name="COMPONENT_NAME",
+        text="display_name",  # Use the new column
+        color_discrete_map={
+            "Critical Risk": "#FF2B2B",
+            "High Risk": "#FF9E2D",
+            "Medium Risk": "#FFDF3C",
+            "Low Risk": "#6ECB63"
+        },
+        title="Component Risk Matrix: Impact vs. Probability",
+        labels={"FAILURE_PROBABILITY": "Failure Probability", 
+                "OPERATIONAL_IMPACT": "Operational Impact"},
+        hover_data=["REPLACEMENT_COST_USD", "AIRCRAFT_REGISTRATION", "COMPONENT_CRITICALITY"]
+    )
+    
+    # Configure text display
     fig_risk.update_traces(
         textposition='top center',
-        textfont=dict(size=10),
-        texttemplate=lambda x: x if risk_data.loc[x.point_inds, "RISK_CATEGORY"].iloc[0] == "Critical Risk" else ""
+        textfont=dict(size=10)
     )
     
     st.plotly_chart(fig_risk, use_container_width=True)
@@ -309,7 +333,7 @@ def main():
     st.header("Maintenance ROI & Cost Savings Analysis")
 
     @st.cache_data(ttl=600)
-    def get_cost_data(_session, airline):
+    def get_cost_data(session, airline):
         # Get more detailed cost data with time dimension
         cost_query = f"""
             SELECT
@@ -441,7 +465,7 @@ def main():
 
     # Call the stored procedure to get an optimized maintenance schedule
     @st.cache_data(ttl=60)  # Short cache time since this depends on sliders
-    def get_schedule_data(_session, airline, downtime_weight, urgency_weight, resource_weight):
+    def get_schedule_data(session, airline, downtime_weight, urgency_weight, resource_weight):
         schedule_query = f"""
             CALL platinum.generate_optimized_maintenance_schedule(
                 '{airline}',
@@ -606,7 +630,7 @@ def main():
 
     # Query for anomaly data with enhanced fields
     @st.cache_data(ttl=600)
-    def get_anomaly_data(_session, airline, from_date, component_type, sensor_type):
+    def get_anomaly_data(session, airline, from_date, component_type, sensor_type):
         anomaly_query = f"""
             WITH base_data AS (
                 SELECT 
