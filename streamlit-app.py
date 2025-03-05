@@ -16,16 +16,9 @@ st.set_page_config(
 )
 
 # Connect to Snowflake
-# You'd have connection parameters stored securely
 def get_snowflake_session(force_refresh=False):
     """
     Create a Snowflake session using environment variables with automatic refresh
-    
-    Args:
-        force_refresh (bool): Force creation of a new session
-        
-    Returns:
-        Session: Snowflake session
     """
     # Load environment variables
     load_dotenv()
@@ -37,7 +30,7 @@ def get_snowflake_session(force_refresh=False):
         "password": os.getenv("SNOWFLAKE_PASSWORD"),
         "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE", "DEMO_WH"),
         "database": os.getenv("SNOWFLAKE_DATABASE", "AIRLINE_OPERATIONAL_DATA"),
-        "schema": os.getenv("SNOWFLAKE_SCHEMA", "PLATINUM"),
+        "schema": os.getenv("SNOWFLAKE_SCHEMA", "GOLD"),
         "role": os.getenv("SNOWFLAKE_ROLE", "STREAMLIT_ROLE")
     }
 
@@ -53,25 +46,16 @@ def get_snowflake_session(force_refresh=False):
         st.error(f"Failed to create Snowflake session: {e}")
         return None
 
-
 # Token refresh mechanism
 @st.cache_resource(ttl=3600)  # Refresh session every hour
 def create_snowflake_session():
     """Cached Snowflake session creation with time-based expiration"""
     return get_snowflake_session()
 
-
 # Error handling wrapper for database queries with auto-refresh
 def safe_snowflake_query(session, query):
     """
     Safely execute Snowflake queries with error handling and session refresh
-    
-    Args:
-        session (Session): Snowflake session
-        query (str): SQL query to execute
-    
-    Returns:
-        pd.DataFrame: Query results or empty DataFrame
     """
     try:
         return session.sql(query).to_pandas()
@@ -97,11 +81,10 @@ def safe_snowflake_query(session, query):
             st.error(f"Database query failed: {e}")
             return pd.DataFrame()
 
-
 def main():
     # Title and introduction
     st.title("Aircraft Predictive Maintenance Dashboard")
-    st.markdown("*Powered by Snowflake | Advanced Analytics Platform*")
+    st.markdown("*Powered by Snowflake | Analytics Dashboard for Aircraft Manufacturer*")
 
     # Create Snowflake session
     session = create_snowflake_session()
@@ -115,30 +98,25 @@ def main():
     # Cache common queries
     @st.cache_data(ttl=600)
     def get_airlines(_session):
-        return _session.table("platinum.airline_dashboard_kpis").select("airline_name").to_pandas()
+        return _session.sql("select distinct airline_name from master_data.airlines").to_pandas()
     
     airlines = get_airlines(session)
     selected_airline = st.sidebar.selectbox("Select Airline", airlines["AIRLINE_NAME"])
-
-    # Date range selector
-    today = datetime.date.today()
-    date_range = st.sidebar.date_input(
-        "Date Range",
-        value=(today - datetime.timedelta(days=30), today),
-        max_value=today
-    )
-
-    # Main dashboard
-    st.title(f"{selected_airline} Aircraft Predictive Maintenance Dashboard")
-
-    # Top KPIs
-    st.header("Fleet Health Overview")
     
+    # Simplified KPIs at top
     @st.cache_data(ttl=600)
     def get_kpi_data(_session, airline):
         kpi_query = f"""
-            SELECT * FROM platinum.airline_dashboard_kpis
-            WHERE airline_name = '{airline}'
+            select 
+                count(distinct a.aircraft_id) as fleet_size,
+                count(distinct case when oms.percent_life_used >= 70 then oms.component_id end) as components_needing_maintenance,
+                count(distinct case when oms.risk_category = 'Critical Risk' then oms.component_id end) as critical_components,
+                sum(mra.potential_savings_usd) as potential_savings_usd
+            from master_data.manufacturer_aircraft a
+            join master_data.airlines air on a.airline_id = air.airline_id
+            left join gold.optimal_maintenance_schedule oms on a.aircraft_id = oms.aircraft_id
+            left join gold.maintenance_roi_analysis mra on oms.component_id = mra.component_id
+            where air.airline_name = '{airline}'
         """
         return safe_snowflake_query(_session, kpi_query)
     
@@ -146,237 +124,364 @@ def main():
 
     # KPI cards in a row
     col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Fleet Size", kpi_data["FLEET_SIZE"].iloc[0])
-    with col2:
-        st.metric("Components Needing Attention", kpi_data["COMPONENTS_NEEDING_ATTENTION"].iloc[0])
-    with col3:
-        st.metric("Critical Risk Components", kpi_data["CRITICAL_RISK_COMPONENTS"].iloc[0])
-    with col4:
-        st.metric("Potential Savings", f"${kpi_data['POTENTIAL_SAVINGS_USD'].iloc[0]:,.2f}")
-
-    # Fleet Health Status
-    st.header("Fleet Health Status")
     
-    @st.cache_data(ttl=600)
-    def get_fleet_data(_session, airline):
-        fleet_query = f"""
-            SELECT aircraft_registration, aircraft_model, health_score, aircraft_health_status,
-                critical_components, warning_components, average_component_wear
-            FROM platinum.fleet_health_scoring
-            WHERE airline_name = '{airline}'
-            ORDER BY health_score
+    # Check if kpi_data has data before accessing it
+    if not kpi_data.empty:
+        with col1:
+            st.metric("Fleet Size", kpi_data["FLEET_SIZE"].iloc[0])
+        with col2:
+            st.metric("Components Needing Attention", kpi_data["COMPONENTS_NEEDING_MAINTENANCE"].iloc[0])
+        with col3:
+            st.metric("Critical Risk Components", kpi_data["CRITICAL_COMPONENTS"].iloc[0])
+        with col4:
+            savings_value = kpi_data["POTENTIAL_SAVINGS_USD"].iloc[0]
+            if pd.notna(savings_value):
+                st.metric("Potential Savings", f"${savings_value:,.2f}")
+            else:
+                st.metric("Potential Savings", "$0")
+    else:
+        st.warning("No KPI data available for selected airline.")
+
+    # PRIMARY VISUALIZATION: Optimal Maintenance Schedule
+    st.header("Optimal Maintenance Schedule")
+    st.markdown("This visualization shows the recommended maintenance timeline across the fleet, optimizing for minimal downtime and resource utilization.")
+    
+    # Add optimization controls
+    optimization_col1, optimization_col2, optimization_col3 = st.columns(3)
+
+    with optimization_col1:
+        downtime_weight = st.slider("Weight: Minimize Downtime", 1, 10, 7)
+
+    with optimization_col2:
+        urgency_weight = st.slider("Weight: Component Urgency", 1, 10, 8) 
+
+    with optimization_col3:
+        resource_weight = st.slider("Weight: Resource Utilization", 1, 10, 5)
+
+    # Get maintenance schedule data
+    @st.cache_data(ttl=60)  # Short cache time since this depends on sliders
+    def get_schedule_data(_session, airline):
+        schedule_query = f"""
+            select 
+                component_id,
+                component_name,
+                aircraft_id,
+                aircraft_registration,
+                aircraft_model,
+                component_category,
+                percent_life_used,
+                risk_category,
+                recommended_date,
+                maintenance_type,
+                maintenance_code,
+                duration_hours,
+                technician_count,
+                can_be_bundled,
+                bundled_components_count,
+                bundled_components,
+                case 
+                    when can_be_bundled then 'Bundled'
+                    else 'Individual'
+                end as maintenance_group,
+                -- Apply optimization weights
+                case
+                    when risk_category = 'Critical Risk' then {urgency_weight} * 10
+                    when risk_category = 'High Risk' then {urgency_weight} * 6
+                    when risk_category = 'Medium Risk' then {urgency_weight} * 3
+                    else {urgency_weight} * 1
+                end +
+                case
+                    when bundled_components_count > 2 then {resource_weight} * 8
+                    when bundled_components_count = 2 then {resource_weight} * 5
+                    else 0
+                end +
+                case
+                    when duration_hours < 24 then {downtime_weight} * 8
+                    when duration_hours < 48 then {downtime_weight} * 5
+                    else {downtime_weight} * 2
+                end as priority_score
+            from gold.optimal_maintenance_schedule
+            where airline_name = '{airline}'
+            order by priority_score desc, recommended_date
         """
-        return safe_snowflake_query(_session, fleet_query)
+        return safe_snowflake_query(_session, schedule_query)
     
-    fleet_data = get_fleet_data(session, selected_airline)
+    schedule_data = get_schedule_data(session, selected_airline)
 
-    # Health score chart
-    fig_health = px.bar(
-        fleet_data, 
-        x="AIRCRAFT_REGISTRATION", 
-        y="HEALTH_SCORE",
-        color="AIRCRAFT_HEALTH_STATUS",
-        color_discrete_map={
-            "Critical": "#FF2B2B",
-            "Warning": "#FF9E2D",
-            "Caution": "#FFDF3C",
-            "Healthy": "#6ECB63"
-        },
-        labels={"AIRCRAFT_REGISTRATION": "Aircraft", "HEALTH_SCORE": "Health Score (0-100)"},
-        title="Aircraft Health Scores"
-    )
-    st.plotly_chart(fig_health, use_container_width=True)
-
-    # ENHANCED VISUALIZATION 1: Component Risk Matrix
-    st.header("Component Risk Matrix")
-    
-    # Add component type filter
-    component_filter = st.selectbox(
-        "Filter by Component Type:", 
-        options=["All", "Engine", "Landing Gear", "APU", "Hydraulic System", "Electrical System", "Flight Controls", "Avionics"],
-        index=0
-    )
-    
-    @st.cache_data(ttl=600)
-    def get_risk_data(_session, airline, component_filter):
-        # Enhanced query for risk matrix
-        risk_query = f"""
-            SELECT 
-                crs.component_id,
-                crs.component_name,
-                crs.aircraft_registration,
-                crs.risk_category,
-                crs.risk_score,
-                crs.failure_probability,
-                crs.component_criticality,
-                -- Calculate operational impact score based on multiple factors
-                CASE
-                    WHEN crs.component_criticality = 'Critical' THEN 90
-                    WHEN crs.component_criticality = 'High' THEN 70
-                    WHEN crs.component_criticality = 'Medium' THEN 50
-                    ELSE 30
-                END + 
-                CASE 
-                    WHEN cht.replacement_cost_usd > 1000000 THEN 10
-                    WHEN cht.replacement_cost_usd > 500000 THEN 7
-                    WHEN cht.replacement_cost_usd > 100000 THEN 5
-                    ELSE 2
-                END AS operational_impact,
-                cht.replacement_cost_usd
-            FROM platinum.component_risk_scoring crs
-            JOIN gold.component_health_tracking cht ON crs.component_id = cht.component_id
-            WHERE crs.airline_name = '{airline}'
-            {f"AND crs.component_name LIKE '%{component_filter}%'" if component_filter != "All" else ""}
-            ORDER BY risk_score DESC
-        """
-        return safe_snowflake_query(_session, risk_query)
-    
-    risk_data = get_risk_data(session, selected_airline, component_filter)
-    
-    # Create true risk matrix
-    fig_risk = px.scatter(
-        risk_data,
-        x="FAILURE_PROBABILITY",
-        y="OPERATIONAL_IMPACT",
-        color="RISK_CATEGORY",
-        size="RISK_SCORE",
-        hover_name="COMPONENT_NAME",
-        text="COMPONENT_NAME",
-        color_discrete_map={
-            "Critical Risk": "#FF2B2B",
-            "High Risk": "#FF9E2D",
-            "Medium Risk": "#FFDF3C",
-            "Low Risk": "#6ECB63"
-        },
-        title="Component Risk Matrix: Impact vs. Probability",
-        labels={"FAILURE_PROBABILITY": "Failure Probability", 
-                "OPERATIONAL_IMPACT": "Operational Impact"},
-        hover_data=["REPLACEMENT_COST_USD", "AIRCRAFT_REGISTRATION", "COMPONENT_CRITICALITY"]
-    )
-    
-    # Add quadrant lines
-    fig_risk.add_shape(type="line", x0=0.5, y0=0, x1=0.5, y1=100,
-                      line=dict(color="grey", width=1, dash="dash"))
-    fig_risk.add_shape(type="line", x0=0, y0=50, x1=1, y1=50,
-                      line=dict(color="grey", width=1, dash="dash"))
-    
-    # Add quadrant labels
-    fig_risk.add_annotation(x=0.25, y=75, text="High Impact<br>Low Probability",
-                          showarrow=False, font=dict(size=10))
-    fig_risk.add_annotation(x=0.75, y=75, text="High Impact<br>High Probability",
-                          showarrow=False, font=dict(size=10, color="red"))
-    fig_risk.add_annotation(x=0.25, y=25, text="Low Impact<br>Low Probability",
-                          showarrow=False, font=dict(size=10))
-    fig_risk.add_annotation(x=0.75, y=25, text="Low Impact<br>High Probability",
-                          showarrow=False, font=dict(size=10))
-    
-    # Improve layout
-    fig_risk.update_layout(
-        height=600,
-        xaxis=dict(range=[0, 1], tickformat=".0%"),
-        yaxis=dict(range=[0, 100]),
-        hoverlabel=dict(bgcolor="white", font_size=12)
-    )
-    
-    # Create text array for component names (only for Critical Risk)
-    risk_data['display_name'] = ''
-    risk_data.loc[risk_data['RISK_CATEGORY'] == 'Critical Risk', 'display_name'] = risk_data.loc[risk_data['RISK_CATEGORY'] == 'Critical Risk', 'COMPONENT_NAME']
-    
-    # Update scatter with pre-populated text
-    fig_risk = px.scatter(
-        risk_data,
-        x="FAILURE_PROBABILITY",
-        y="OPERATIONAL_IMPACT",
-        color="RISK_CATEGORY",
-        size="RISK_SCORE",
-        hover_name="COMPONENT_NAME",
-        text="display_name",  # Use the new column
-        color_discrete_map={
-            "Critical Risk": "#FF2B2B",
-            "High Risk": "#FF9E2D",
-            "Medium Risk": "#FFDF3C",
-            "Low Risk": "#6ECB63"
-        },
-        title="Component Risk Matrix: Impact vs. Probability",
-        labels={"FAILURE_PROBABILITY": "Failure Probability", 
-                "OPERATIONAL_IMPACT": "Operational Impact"},
-        hover_data=["REPLACEMENT_COST_USD", "AIRCRAFT_REGISTRATION", "COMPONENT_CRITICALITY"]
-    )
-    
-    # Configure text display
-    fig_risk.update_traces(
-        textposition='top center',
-        textfont=dict(size=10)
-    )
-    
-    st.plotly_chart(fig_risk, use_container_width=True)
-    
-    # Show top critical components in table format
-    if not risk_data.empty:
-        critical_components = risk_data[risk_data["RISK_CATEGORY"] == "Critical Risk"].sort_values("RISK_SCORE", ascending=False).head(5)
-        if not critical_components.empty:
-            st.subheader("Top Critical Components")
-            st.dataframe(
-                critical_components[["COMPONENT_NAME", "AIRCRAFT_REGISTRATION", "FAILURE_PROBABILITY", "RISK_SCORE", "REPLACEMENT_COST_USD"]],
-                column_config={
-                    "COMPONENT_NAME": "Component",
-                    "AIRCRAFT_REGISTRATION": "Aircraft",
-                    "FAILURE_PROBABILITY": st.column_config.NumberColumn("Failure Probability", format="%.1f%%", width="medium"),
-                    "RISK_SCORE": st.column_config.NumberColumn("Risk Score", format="%.1f", width="small"),
-                    "REPLACEMENT_COST_USD": st.column_config.NumberColumn("Replacement Cost", format="$%d", width="medium")
-                },
-                use_container_width=True
+    # Create the enhanced Gantt chart
+    if not schedule_data.empty:
+        # Add columns for resource info display
+        resource_col1, resource_col2 = st.columns(2)
+        
+        with resource_col1:
+            # Show resource utilization chart
+            if 'RECOMMENDED_DATE' in schedule_data.columns and 'TECHNICIAN_COUNT' in schedule_data.columns:
+                resources_by_day = schedule_data.groupby('RECOMMENDED_DATE').agg({
+                    'TECHNICIAN_COUNT': 'sum',
+                    'COMPONENT_ID': 'count'
+                }).reset_index()
+                
+                resources_by_day.rename(columns={'COMPONENT_ID': 'MAINTENANCE_COUNT'}, inplace=True)
+                
+                # Create figure with secondary y-axis
+                fig_resources = go.Figure()
+                
+                # Add bars for technician count
+                fig_resources.add_trace(go.Bar(
+                    x=resources_by_day['RECOMMENDED_DATE'],
+                    y=resources_by_day['TECHNICIAN_COUNT'],
+                    name='Technicians Needed',
+                    marker_color='#1f77b4'
+                ))
+                
+                # Add line for maintenance count
+                fig_resources.add_trace(go.Scatter(
+                    x=resources_by_day['RECOMMENDED_DATE'],
+                    y=resources_by_day['MAINTENANCE_COUNT'],
+                    name='Maintenance Events',
+                    mode='lines+markers',
+                    marker=dict(color='#ff7f0e'),
+                    line=dict(width=3),
+                    yaxis='y2'
+                ))
+                
+                # Add capacity line
+                max_daily_capacity = 25  # This would come from your data in practice
+                fig_resources.add_shape(
+                    type="line",
+                    x0=resources_by_day['RECOMMENDED_DATE'].min(),
+                    y0=max_daily_capacity,
+                    x1=resources_by_day['RECOMMENDED_DATE'].max(),
+                    y1=max_daily_capacity,
+                    line=dict(color="red", width=2, dash="dash")
+                )
+                
+                fig_resources.add_annotation(
+                    x=resources_by_day['RECOMMENDED_DATE'].iloc[len(resources_by_day)//2],
+                    y=max_daily_capacity,
+                    text="Max Technician Capacity",
+                    showarrow=False,
+                    yshift=10
+                )
+                
+                # Update layout with second y-axis
+                fig_resources.update_layout(
+                    title="Resource Requirements by Day",
+                    xaxis_title="Date",
+                    yaxis_title="Technicians Needed",
+                    yaxis2=dict(
+                        title="Maintenance Events",
+                        titlefont=dict(color='#ff7f0e'),
+                        tickfont=dict(color='#ff7f0e'),
+                        overlaying='y',
+                        side='right'
+                    ),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                
+                st.plotly_chart(fig_resources, use_container_width=True)
+            else:
+                st.warning("Resource utilization data not available in the schedule.")
+        
+        with resource_col2:
+            # Show maintenance stats
+            st.subheader("Maintenance Optimization")
+            
+            # Display summary metrics
+            total_events = len(schedule_data)
+            bundled_events = schedule_data[schedule_data['CAN_BE_BUNDLED'] == True].shape[0]
+            unbundled_events = total_events - bundled_events
+            
+            # Calculate total technician hours
+            if 'DURATION_HOURS' in schedule_data.columns and 'TECHNICIAN_COUNT' in schedule_data.columns:
+                total_tech_hours = int(schedule_data['DURATION_HOURS'].sum() * schedule_data['TECHNICIAN_COUNT'].sum())
+                
+                # Calculate the non-optimized hours (if each was done individually)
+                non_optimized_tech_hours = total_tech_hours * 1.3  # Assuming 30% efficiency gain from optimization
+                
+                # Tech hours saved
+                tech_hours_saved = non_optimized_tech_hours - total_tech_hours
+                
+                # Cost savings (assuming $85/hour technician cost)
+                cost_savings = tech_hours_saved * 85
+            else:
+                total_tech_hours = 0
+                tech_hours_saved = 0
+                cost_savings = 0
+            
+            # Metrics
+            metric_col1, metric_col2 = st.columns(2)
+            with metric_col1:
+                st.metric("Total Maintenance Events", total_events)
+                st.metric("Bundled Events", bundled_events, f"+{bundled_events} efficiency")
+            
+            with metric_col2:
+                st.metric("Technician-Hours", total_tech_hours)
+                st.metric("Hours Saved Through Bundling", int(tech_hours_saved), f"${cost_savings:,.0f}")
+            
+            # Pie chart of maintenance by risk category
+            if not schedule_data.empty and 'RISK_CATEGORY' in schedule_data.columns:
+                risk_counts = schedule_data['RISK_CATEGORY'].value_counts().reset_index()
+                risk_counts.columns = ['RISK_CATEGORY', 'COUNT']
+                
+                fig_risk_pie = px.pie(
+                    risk_counts, 
+                    values='COUNT', 
+                    names='RISK_CATEGORY',
+                    title='Maintenance by Risk Category',
+                    color='RISK_CATEGORY',
+                    color_discrete_map={
+                        "Critical Risk": "#FF2B2B",
+                        "High Risk": "#FF9E2D",
+                        "Medium Risk": "#FFDF3C",
+                        "Low Risk": "#6ECB63"
+                    }
+                )
+                fig_risk_pie.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig_risk_pie, use_container_width=True)
+        
+        # Process Gantt chart data
+        if 'RECOMMENDED_DATE' in schedule_data.columns:
+            # Create layout for full-width Gantt chart
+            st.markdown("### Maintenance Schedule Timeline")
+            
+            # Convert to datetime if not already
+            schedule_data['RECOMMENDED_DATE'] = pd.to_datetime(schedule_data['RECOMMENDED_DATE'])
+            
+            # Add end date for Gantt chart (duration-based)
+            schedule_data['END_DATE'] = schedule_data.apply(
+                lambda x: x['RECOMMENDED_DATE'] + pd.Timedelta(hours=float(x['DURATION_HOURS'])), 
+                axis=1
             )
+            
+            # Enhanced Gantt chart
+            fig_gantt = px.timeline(
+                schedule_data, 
+                x_start="RECOMMENDED_DATE", 
+                x_end="END_DATE", 
+                y="AIRCRAFT_REGISTRATION",
+                color="RISK_CATEGORY",
+                hover_name="COMPONENT_NAME",
+                hover_data=["DURATION_HOURS", "TECHNICIAN_COUNT", "MAINTENANCE_TYPE", "BUNDLED_COMPONENTS"],
+                color_discrete_map={
+                    "Critical Risk": "#FF2B2B",
+                    "High Risk": "#FF9E2D",
+                    "Medium Risk": "#FFDF3C",
+                    "Low Risk": "#6ECB63"
+                },
+                pattern_shape="MAINTENANCE_GROUP",
+                pattern_shape_map={"Bundled": "", "Individual": ""},
+                labels={
+                    "RECOMMENDED_DATE": "Start Date",
+                    "END_DATE": "End Date",
+                    "AIRCRAFT_REGISTRATION": "Aircraft",
+                    "COMPONENT_NAME": "Component"
+                }
+            )
+            
+            # Improve visual presentation
+            fig_gantt.update_yaxes(autorange="reversed")
+            fig_gantt.update_layout(
+                height=600,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+                title="Optimal Maintenance Schedule by Aircraft"
+            )
+            
+            # Add vertical line for today
+            today = pd.to_datetime('today')
+            fig_gantt.add_vline(x=today, line_width=2, line_dash="solid", line_color="black")
+            fig_gantt.add_annotation(x=today, y=0, text="Today", showarrow=False, yshift=10)
+            
+            # Show component bundling with custom data points
+            for aircraft in schedule_data['AIRCRAFT_REGISTRATION'].unique():
+                aircraft_data = schedule_data[schedule_data['AIRCRAFT_REGISTRATION'] == aircraft]
+                bundled_dates = aircraft_data[aircraft_data['CAN_BE_BUNDLED']]['RECOMMENDED_DATE'].unique()
+                
+                for date in bundled_dates:
+                    bundled_group = aircraft_data[
+                        (aircraft_data['RECOMMENDED_DATE'] == date) & 
+                        (aircraft_data['CAN_BE_BUNDLED'])
+                    ]
+                    
+                    if len(bundled_group) > 1:
+                        # Add highlight indicator for bundled maintenance
+                        # Using a transparent rectangle to highlight bundled maintenance period
+                        fig_gantt.add_shape(
+                            type="rect",
+                            x0=bundled_group['RECOMMENDED_DATE'].min(),
+                            y0=aircraft,
+                            x1=bundled_group['END_DATE'].max(),
+                            y1=aircraft,
+                            line=dict(color="rgba(0,0,0,0)"),
+                            fillcolor="rgba(65,105,225,0.2)",
+                            layer="below"
+                        )
+            
+            st.plotly_chart(fig_gantt, use_container_width=True)
+            
+            # Add table of upcoming maintenance
+            with st.expander("View Upcoming Maintenance Details"):
+                upcoming = schedule_data[schedule_data['RECOMMENDED_DATE'] >= today].sort_values('RECOMMENDED_DATE').head(10)
+                
+                if not upcoming.empty:
+                    upcoming_display = upcoming[[
+                        'COMPONENT_NAME', 'RISK_CATEGORY', 'AIRCRAFT_REGISTRATION', 
+                        'RECOMMENDED_DATE', 'DURATION_HOURS', 'MAINTENANCE_TYPE'
+                    ]].copy()
+                    
+                    # Format date for display
+                    upcoming_display['RECOMMENDED_DATE'] = upcoming_display['RECOMMENDED_DATE'].dt.strftime('%Y-%m-%d')
+                    
+                    st.dataframe(
+                        upcoming_display,
+                        column_config={
+                            "COMPONENT_NAME": "Component",
+                            "RISK_CATEGORY": st.column_config.TextColumn("Risk Level"),
+                            "AIRCRAFT_REGISTRATION": "Aircraft",
+                            "RECOMMENDED_DATE": "Date",
+                            "DURATION_HOURS": st.column_config.NumberColumn("Duration (hrs)", format="%.1f"),
+                            "MAINTENANCE_TYPE": "Type"
+                        },
+                        use_container_width=True
+                    )
+        else:
+            st.warning("Missing required date columns in schedule data.")
+    else:
+        st.warning("No maintenance schedule data available. Please check your data or Snowflake connection.")
 
-    # ENHANCED VISUALIZATION 2: Cost Savings Dashboard
-    st.header("Maintenance ROI & Cost Savings Analysis")
-
-    @st.cache_data(ttl=600)
-    def get_cost_data(_session, airline):
-        # Get more detailed cost data with time dimension
-        cost_query = f"""
-            SELECT
-                -- For trend analysis over time
-                DATE_TRUNC('month', r.recommended_date) AS month,
-                SUM(cba.potential_cost_savings_usd) AS cumulative_savings,
-                -- For component breakdown
-                ct.component_category,
-                SUM(cba.reactive_maintenance_cost_usd) AS reactive_cost,
-                SUM(cba.predictive_maintenance_cost_usd) AS predictive_cost,
-                SUM(cba.potential_cost_savings_usd) AS savings,
-                -- For ROI calculation
-                AVG(cba.roi_percentage) AS avg_roi
-            FROM platinum.maintenance_recommendations r
-            JOIN platinum.maintenance_cost_benefit_analysis cba ON r.component_id = cba.component_id
-            JOIN gold.component_health_tracking cht ON r.component_id = cht.component_id
-            JOIN master_data.component_types ct ON cht.component_type_id = ct.component_type_id
-            WHERE cht.airline_name = '{airline}'
-            GROUP BY 1, 3
-            ORDER BY 1, 3
-        """
-        return safe_snowflake_query(_session, cost_query)
+    # SECONDARY VISUALIZATION: Maintenance ROI Analysis
+    st.header("Maintenance ROI Analysis")
+    st.markdown("This analysis compares costs between reactive (unplanned) maintenance and predictive (planned) maintenance, showing potential savings.")
     
-    cost_data = get_cost_data(session, selected_airline)
+    @st.cache_data(ttl=600)
+    def get_roi_data(_session, airline):
+        roi_query = f"""
+            select 
+                component_category,
+                sum(reactive_maintenance_cost_usd) as reactive_cost,
+                sum(predictive_maintenance_cost_usd) as predictive_cost,
+                sum(potential_savings_usd) as savings,
+                avg(roi_percentage) as roi_percentage,
+                sum(downtime_hours_saved) as downtime_hours_saved,
+                sum(estimated_flights_saved) as flights_saved
+            from gold.maintenance_roi_analysis
+            where airline_name = '{airline}'
+            group by component_category
+        """
+        return safe_snowflake_query(_session, roi_query)
+    
+    roi_data = get_roi_data(session, selected_airline)
     
     # Create two columns for cost visualizations
-    cost_col1, cost_col2 = st.columns(2)
+    roi_col1, roi_col2 = st.columns(2)
     
-    with cost_col1:
-        if not cost_data.empty:
-            # Enhanced cost comparison with annotations
-            # Aggregate by component category
-            summary_data = cost_data.groupby('COMPONENT_CATEGORY').agg({
-                'REACTIVE_COST': 'sum',
-                'PREDICTIVE_COST': 'sum',
-                'SAVINGS': 'sum'
-            }).reset_index()
-            
+    with roi_col1:
+        if not roi_data.empty:
             # Create a stacked bar chart for reactive vs predictive by component
             comp_cost_data = pd.DataFrame({
-                'Component Category': summary_data['COMPONENT_CATEGORY'].repeat(2),
-                'Maintenance Type': ['Reactive', 'Predictive'] * len(summary_data),
-                'Cost (USD)': list(summary_data['REACTIVE_COST']) + list(summary_data['PREDICTIVE_COST'])
+                'Component Category': roi_data['COMPONENT_CATEGORY'].repeat(2),
+                'Maintenance Type': ['Reactive', 'Predictive'] * len(roi_data),
+                'Cost (USD)': list(roi_data['REACTIVE_COST']) + list(roi_data['PREDICTIVE_COST'])
             })
             
             fig_cost = px.bar(
@@ -385,7 +490,7 @@ def main():
                 y='Cost (USD)',
                 color='Maintenance Type',
                 barmode='group',
-                title='Cost Comparison by Component Category',
+                title='Cost Comparison: Reactive vs. Predictive Maintenance',
                 color_discrete_map={
                     'Reactive': '#FF5A5F',
                     'Predictive': '#2E86C1'
@@ -393,7 +498,7 @@ def main():
             )
             
             # Add savings annotations
-            for i, row in summary_data.iterrows():
+            for i, row in roi_data.iterrows():
                 savings_pct = (row['SAVINGS'] / row['REACTIVE_COST']) * 100 if row['REACTIVE_COST'] > 0 else 0
                 fig_cost.add_annotation(
                     x=row['COMPONENT_CATEGORY'],
@@ -407,464 +512,129 @@ def main():
         else:
             st.warning("No cost data available for selected airline.")
     
-    with cost_col2:
-        if not cost_data.empty:
-            # Create cumulative savings trend chart
-            trend_data = cost_data.groupby('MONTH').agg({
-                'CUMULATIVE_SAVINGS': 'sum'
-            }).reset_index()
+    with roi_col2:
+        if not roi_data.empty:
+            # Calculate total savings and operational impact
+            total_savings = roi_data['SAVINGS'].sum()
+            total_downtime_saved = roi_data['DOWNTIME_HOURS_SAVED'].sum()
+            total_flights_saved = roi_data['FLIGHTS_SAVED'].sum()
             
-            # Sort by date
-            trend_data = trend_data.sort_values('MONTH')
+            # Create a waterfall chart showing business impact
+            impact_categories = ['Maintenance Costs', 'Crew Costs', 'Opportunity Costs', 'Total Savings']
             
-            # Calculate cumulative total
-            trend_data['RUNNING_TOTAL'] = trend_data['CUMULATIVE_SAVINGS'].cumsum()
+            # Calculate component values (simplified model)
+            maintenance_savings = total_savings * 0.6  # 60% of savings from direct maintenance
+            crew_costs = total_savings * 0.15        # 15% from avoiding crew overtime/costs
+            opportunity_costs = total_savings * 0.25  # 25% from avoiding lost revenue
             
-            fig_trend = px.area(
-                trend_data,
-                x='MONTH',
-                y='RUNNING_TOTAL',
-                title='Cumulative Cost Savings Over Time',
-                labels={'RUNNING_TOTAL': 'Cumulative Savings (USD)', 'MONTH': 'Month'}
-            )
+            impact_values = [maintenance_savings, crew_costs, opportunity_costs, total_savings]
             
-            fig_trend.update_traces(
-                line=dict(color='#28B463'),
-                fillcolor='rgba(40, 180, 99, 0.3)'
-            )
-            
-            # Add ROI indicator
-            avg_roi = cost_data['AVG_ROI'].mean()
-            if not pd.isna(avg_roi) and len(trend_data) > 0:
-                fig_trend.add_annotation(
-                    x=trend_data['MONTH'].iloc[-1],
-                    y=trend_data['RUNNING_TOTAL'].iloc[-1],
-                    text=f"Average ROI: {avg_roi:.1f}%",
-                    showarrow=True,
-                    arrowhead=1
-                )
-            
-            st.plotly_chart(fig_trend, use_container_width=True)
-        else:
-            st.warning("No trend data available for selected airline.")
-
-    # ENHANCED VISUALIZATION 3: Maintenance Schedule Optimizer
-    st.header("Optimized Maintenance Schedule")
-
-    # Add optimization controls
-    optimization_col1, optimization_col2, optimization_col3 = st.columns(3)
-
-    with optimization_col1:
-        downtime_weight = st.slider("Weight: Minimize Downtime", 1, 10, 5)
-
-    with optimization_col2:
-        urgency_weight = st.slider("Weight: Component Urgency", 1, 10, 7) 
-
-    with optimization_col3:
-        resource_weight = st.slider("Weight: Resource Utilization", 1, 10, 3)
-
-    # Call the stored procedure to get an optimized maintenance schedule
-    @st.cache_data(ttl=60)  # Short cache time since this depends on sliders
-    def get_schedule_data(_session, airline, downtime_weight, urgency_weight, resource_weight):
-        schedule_query = f"""
-            CALL platinum.generate_optimized_maintenance_schedule(
-                '{airline}',
-                {downtime_weight},
-                {urgency_weight},
-                {resource_weight}
-            )
-        """
-        return safe_snowflake_query(_session, schedule_query)
-    
-    schedule_data = get_schedule_data(session, selected_airline, downtime_weight, urgency_weight, resource_weight)
-
-    # Create the enhanced Gantt chart
-    if not schedule_data.empty:
-        # Add columns for resource info display
-        resource_col1, resource_col2 = st.columns(2)
-        
-        with resource_col1:
-            # Show resource utilization chart (if data has the right columns)
-            if 'SCHEDULED_DATE' in schedule_data.columns and 'TECHNICIAN_COUNT' in schedule_data.columns:
-                resources_by_day = schedule_data.groupby('SCHEDULED_DATE').agg({
-                    'TECHNICIAN_COUNT': 'sum'
-                }).reset_index()
-                
-                fig_resources = px.bar(
-                    resources_by_day,
-                    x='SCHEDULED_DATE',
-                    y='TECHNICIAN_COUNT',
-                    title="Daily Technician Requirements",
-                    labels={'TECHNICIAN_COUNT': 'Technicians Needed'}
-                )
-                
-                # Add capacity line
-                max_daily_capacity = 25  # This would come from your data in practice
-                fig_resources.add_shape(
-                    type="line",
-                    x0=resources_by_day['SCHEDULED_DATE'].min(),
-                    y0=max_daily_capacity,
-                    x1=resources_by_day['SCHEDULED_DATE'].max(),
-                    y1=max_daily_capacity,
-                    line=dict(color="red", width=2, dash="dash")
-                )
-                
-                fig_resources.add_annotation(
-                    x=resources_by_day['SCHEDULED_DATE'].mean(),
-                    y=max_daily_capacity,
-                    text="Max Capacity",
-                    showarrow=False,
-                    yshift=10
-                )
-                
-                st.plotly_chart(fig_resources, use_container_width=True)
-            else:
-                st.warning("Resource utilization data not available in the schedule.")
-        
-        with resource_col2:
-            # Show maintenance duration chart
-            st.metric("Total Maintenance Events", len(schedule_data))
-            
-            if 'DURATION_HOURS' in schedule_data.columns and 'TECHNICIAN_COUNT' in schedule_data.columns:
-                st.metric("Total Technician-Hours", 
-                         int(schedule_data['DURATION_HOURS'].sum() * schedule_data['TECHNICIAN_COUNT'].sum()))
-            
-            if 'SCHEDULED_DATE' in schedule_data.columns:
-                st.metric("Total Aircraft Days Affected", schedule_data['SCHEDULED_DATE'].nunique())
-            
-            # Calculate before vs after optimization stats
-            st.markdown("### Optimization Improvements")
-            
-            # This would be calculated from your data in real implementation
-            before_after_data = pd.DataFrame({
-                'Metric': ['Aircraft Downtime', 'Maintenance Costs', 'Resource Utilization'],
-                'Before': [100, 100, 100],
-                'After': [68, 82, 92]
+            # Create data for the waterfall chart
+            waterfall_data = pd.DataFrame({
+                'Category': impact_categories,
+                'Value': impact_values,
+                'Type': ['Positive', 'Positive', 'Positive', 'Total']
             })
             
-            fig_improvement = px.bar(
-                before_after_data,
-                x='Metric',
-                y=['Before', 'After'],
-                barmode='group',
-                title="Optimization Impact (%)",
-                color_discrete_map={
-                    'Before': '#DB4437',
-                    'After': '#0F9D58'
-                }
+            fig_impact = go.Figure(go.Waterfall(
+                name="Business Impact", 
+                orientation="v",
+                measure=waterfall_data['Type'],
+                x=waterfall_data['Category'],
+                y=waterfall_data['Value'],
+                connector={"line":{"color":"rgb(63, 63, 63)"}},
+                decreasing={"marker":{"color":"#FF5A5F"}},
+                increasing={"marker":{"color":"#2E86C1"}},
+                totals={"marker":{"color":"#28B463"}}
+            ))
+            
+            fig_impact.update_layout(
+                title="Business Impact of Predictive Maintenance",
+                showlegend=False
             )
             
-            st.plotly_chart(fig_improvement, use_container_width=True)
-        
-        # Process Gantt chart data
-        if 'RECOMMENDED_DATE' in schedule_data.columns:
-            schedule_data['START_DATE'] = schedule_data['RECOMMENDED_DATE']
-            schedule_data['END_DATE'] = schedule_data.apply(
-                lambda x: x['RECOMMENDED_DATE'] + pd.Timedelta(days=1), axis=1
-            )
+            st.plotly_chart(fig_impact, use_container_width=True)
             
-            # Enhanced Gantt chart
-            fig_gantt = px.timeline(
-                schedule_data, 
-                x_start="START_DATE", 
-                x_end="END_DATE", 
-                y="AIRCRAFT_REGISTRATION",
-                color="RISK_CATEGORY",
-                hover_name="COMPONENT_NAME",
-                hover_data=["DURATION_HOURS", "TECHNICIAN_COUNT", "MAINTENANCE_TYPE"] if all(col in schedule_data.columns for col in ["DURATION_HOURS", "TECHNICIAN_COUNT", "MAINTENANCE_TYPE"]) else None,
-                color_discrete_map={
-                    "Critical Risk": "#FF2B2B",
-                    "High Risk": "#FF9E2D",
-                    "Medium Risk": "#FFDF3C",
-                    "Low Risk": "#6ECB63"
-                },
-                title="Maintenance Schedule Timeline"
-            )
+            # Key metrics for operational impact
+            op_col1, op_col2, op_col3 = st.columns(3)
             
-            fig_gantt.update_yaxes(autorange="reversed")
-            fig_gantt.update_layout(height=600)
+            with op_col1:
+                st.metric("Total Cost Savings", f"${total_savings:,.0f}")
             
-            # Add vertical line for today
-            today = pd.to_datetime('today')
-            fig_gantt.add_vline(x=today, line_width=2, line_dash="solid", line_color="black")
-            fig_gantt.add_annotation(x=today, y=0, text="Today", showarrow=False, yshift=10)
+            with op_col2:
+                st.metric("Downtime Hours Avoided", f"{total_downtime_saved:,.0f} hrs")
             
-            st.plotly_chart(fig_gantt, use_container_width=True)
+            with op_col3:
+                st.metric("Potential Flights Saved", f"{total_flights_saved:,.1f}")
         else:
-            st.warning("Missing required date columns in schedule data.")
-    else:
-        st.warning("No maintenance schedule data available.")
+            st.warning("No impact data available for selected airline.")
 
-    # ENHANCED VISUALIZATION 4: Sensor Anomaly Analysis
-    st.header("Sensor Anomaly Analysis")
-
-    # Add more sophisticated controls
-    anomaly_col1, anomaly_col2, anomaly_col3 = st.columns(3)
-
-    with anomaly_col1:
-        component_type = st.selectbox(
-            "Component Type",
-            ["All", "Engine", "Landing Gear", "APU", "Hydraulic System", "Electrical System", "Flight Controls", "Avionics"]
-        )
-
-    with anomaly_col2:
-        sensor_type = st.selectbox(
-            "Sensor Type",
-            ["All", "Temperature", "Pressure", "Vibration", "Flow Rate", "RPM"]
-        )
-
-    with anomaly_col3:
-        time_range = st.selectbox(
-            "Time Range",
-            ["Last 30 Days", "Last 90 Days", "Last 6 Months", "Last Year"]
-        )
-
-    # Convert time range to actual date
-    time_mapping = {
-        "Last 30 Days": 30,
-        "Last 90 Days": 90,
-        "Last 6 Months": 180,
-        "Last Year": 365
-    }
-    from_date = (pd.to_datetime('today') - pd.Timedelta(days=time_mapping[time_range])).strftime('%Y-%m-%d')
-
-    # Query for anomaly data with enhanced fields
-    @st.cache_data(ttl=600)
-    def get_anomaly_data(_session, airline, from_date, component_type, sensor_type):
-        anomaly_query = f"""
-            WITH base_data AS (
-                SELECT 
-                    sa.reading_date,
-                    sa.sensor_id,
-                    sa.sensor_name,
-                    sa.component_id,
-                    sa.component_name,
-                    ct.component_category,
-                    sa.aircraft_id,
-                    sa.aircraft_registration,
-                    sa.critical_anomalies,
-                    sa.warning_anomalies,
-                    sa.statistical_anomalies,
-                    sa.total_readings,
-                    -- Pattern information
-                    CASE 
-                        WHEN sa.reading_date > CURRENT_DATE - 7 AND sa.critical_anomalies > 0 THEN 'Recent Critical'
-                        WHEN sa.critical_anomalies > 5 THEN 'Multiple Critical'
-                        WHEN sa.warning_anomalies > 10 THEN 'Multiple Warnings'
-                        WHEN sa.warning_anomalies > 0 AND sa.statistical_anomalies > 5 THEN 'Developing Issue'
-                        ELSE 'Normal'
-                    END AS pattern_type,
-                    -- For forecast
-                    AVG(sa.warning_anomalies) OVER (
-                        PARTITION BY sa.component_id 
-                        ORDER BY sa.reading_date
-                        ROWS BETWEEN 14 PRECEDING AND CURRENT ROW
-                    ) AS moving_avg_warnings,
-                    AVG(sa.critical_anomalies) OVER (
-                        PARTITION BY sa.component_id 
-                        ORDER BY sa.reading_date
-                        ROWS BETWEEN 14 PRECEDING AND CURRENT ROW
-                    ) AS moving_avg_critical
-                FROM platinum.sensor_anomaly_timeline sa
-                JOIN gold.component_health_tracking cht ON sa.component_id = cht.component_id
-                JOIN master_data.component_types ct ON cht.component_type_id = ct.component_type_id
-                WHERE sa.airline_name = '{airline}'
-                AND sa.reading_date >= '{from_date}'
-                {f"AND ct.component_category LIKE '%{component_type}%'" if component_type != "All" else ""}
-                {f"AND sa.sensor_name LIKE '%{sensor_type}%'" if sensor_type != "All" else ""}
-            )
-            SELECT * FROM base_data
-            ORDER BY reading_date
-        """
-        return safe_snowflake_query(_session, anomaly_query)
+    # Data Sharing Information
+    st.header("Secure Data Sharing with Airlines")
+    st.markdown("""
+    This dashboard leverages Snowflake's secure data sharing capabilities to provide airlines with:
     
-    anomaly_data = get_anomaly_data(session, selected_airline, from_date, component_type, sensor_type)
-
-    # Two-part visualization: timeline view and heatmap view
-    anomaly_tabs = st.tabs(["Timeline Analysis", "Anomaly Heatmap", "Pattern Detection"])
-
-    with anomaly_tabs[0]:
-        if not anomaly_data.empty:
-            # Aggregate by date for the timeline
-            timeline_data = anomaly_data.groupby('READING_DATE').agg({
-                'CRITICAL_ANOMALIES': 'sum',
-                'WARNING_ANOMALIES': 'sum',
-                'STATISTICAL_ANOMALIES': 'sum'
-            }).reset_index()
-            
-            # Add forecasted values for next 14 days
-            last_date = pd.to_datetime(timeline_data['READING_DATE'].max())
-            forecast_dates = [last_date + pd.Timedelta(days=i) for i in range(1, 15)]
-            
-            # Simple forecasting (in a real app you'd use a proper model)
-            last_data = timeline_data.iloc[-14:].mean() if len(timeline_data) >= 14 else timeline_data.mean()
-            trend_factor = 1.0
-            if len(timeline_data) > 28:
-                last_period = timeline_data.iloc[-14:]
-                prior_period = timeline_data.iloc[-28:-14]
-                if last_period['CRITICAL_ANOMALIES'].mean() > prior_period['CRITICAL_ANOMALIES'].mean():
-                    trend_factor = last_period['CRITICAL_ANOMALIES'].mean() / max(1, prior_period['CRITICAL_ANOMALIES'].mean())
-                    trend_factor = min(2.0, max(1.0, trend_factor))  # Cap between 1.0-2.0
-            
-            forecast_data = pd.DataFrame({
-                'READING_DATE': forecast_dates,
-                'CRITICAL_ANOMALIES': [last_data['CRITICAL_ANOMALIES'] * trend_factor * (1.05**i) for i in range(1, 15)],
-                'WARNING_ANOMALIES': [last_data['WARNING_ANOMALIES'] * trend_factor * (1.03**i) for i in range(1, 15)],
-                'STATISTICAL_ANOMALIES': [last_data['STATISTICAL_ANOMALIES'] * trend_factor * (1.02**i) for i in range(1, 15)]
-            })
-            
-            # Mark as forecast
-            forecast_data['IS_FORECAST'] = True
-            timeline_data['IS_FORECAST'] = False
-            
-            # Create enhanced timeline with forecast
-            fig_timeline = go.Figure()
-            
-            # Add actual data
-            fig_timeline.add_trace(go.Scatter(
-                x=timeline_data['READING_DATE'],
-                y=timeline_data['CRITICAL_ANOMALIES'],
-                mode='lines+markers',
-                name='Critical Anomalies',
-                line=dict(color='#FF2B2B', width=2),
-                marker=dict(size=6)
-            ))
-            
-            fig_timeline.add_trace(go.Scatter(
-                x=timeline_data['READING_DATE'],
-                y=timeline_data['WARNING_ANOMALIES'],
-                mode='lines+markers',
-                name='Warning Anomalies',
-                line=dict(color='#FF9E2D', width=2),
-                marker=dict(size=6)
-            ))
-            
-            # Add forecast data
-            fig_timeline.add_trace(go.Scatter(
-                x=forecast_data['READING_DATE'],
-                y=forecast_data['CRITICAL_ANOMALIES'],
-                mode='lines',
-                name='Critical Forecast',
-                line=dict(color='#FF2B2B', width=2, dash='dash')
-            ))
-            
-            fig_timeline.add_trace(go.Scatter(
-                x=forecast_data['READING_DATE'],
-                y=forecast_data['WARNING_ANOMALIES'],
-                mode='lines',
-                name='Warning Forecast',
-                line=dict(color='#FF9E2D', width=2, dash='dash')
-            ))
-            
-            # Add a vertical line for today
-            today = pd.to_datetime('today')
-            fig_timeline.add_vline(x=today, line_width=2, line_dash="dash", line_color="black")
-            fig_timeline.add_annotation(x=today, y=0, text="Today", showarrow=False, yshift=10)
-            
-            # Update layout
-            fig_timeline.update_layout(
-                title='Sensor Anomalies Timeline with 14-Day Forecast',
-                xaxis_title='Date',
-                yaxis_title='Number of Anomalies',
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-                height=500
-            )
-            
-            st.plotly_chart(fig_timeline, use_container_width=True)
-        else:
-            st.warning("No anomaly data available for the selected filters.")
-
-    with anomaly_tabs[1]:
-        # Create heatmap data - aggregate by component and date
-        if not anomaly_data.empty:
-            try:
-                # Pivot data for heatmap - handle potential pivot errors
-                component_dates = anomaly_data.pivot_table(
-                    index='COMPONENT_NAME',
-                    columns='READING_DATE',
-                    values='CRITICAL_ANOMALIES',
-                    aggfunc='sum',
-                    fill_value=0
-                )
-                
-                if not component_dates.empty:
-                    # Create heatmap
-                    fig_heatmap = px.imshow(
-                        component_dates,
-                        labels=dict(x="Date", y="Component", color="Critical Anomalies"),
-                        x=component_dates.columns,
-                        y=component_dates.index,
-                        color_continuous_scale='Reds',
-                        title='Critical Anomalies by Component Over Time'
-                    )
-                    
-                    fig_heatmap.update_layout(height=600)
-                    st.plotly_chart(fig_heatmap, use_container_width=True)
-                else:
-                    st.warning("No critical anomalies detected in the selected time period.")
-            except Exception as e:
-                st.error(f"Error creating heatmap: {e}")
-                st.warning("Insufficient data for heatmap visualization.")
-        else:
-            st.warning("No anomaly data available for the selected filters.")
-
-    with anomaly_tabs[2]:
-        # Pattern detection and analysis
-        if not anomaly_data.empty and 'PATTERN_TYPE' in anomaly_data.columns:
-            pattern_data = anomaly_data.groupby('PATTERN_TYPE').agg({
-                'COMPONENT_ID': 'nunique',
-                'CRITICAL_ANOMALIES': 'sum',
-                'WARNING_ANOMALIES': 'sum'
-            }).reset_index()
-            
-            fig_patterns = px.bar(
-                pattern_data,
-                x='PATTERN_TYPE',
-                y='COMPONENT_ID',
-                title='Components Showing Anomaly Patterns',
-                color='PATTERN_TYPE',
-                text='COMPONENT_ID',
-                color_discrete_map={
-                    'Recent Critical': '#FF2B2B',
-                    'Multiple Critical': '#FF5A5F',
-                    'Multiple Warnings': '#FF9E2D',
-                    'Developing Issue': '#FFDF3C',
-                    'Normal': '#6ECB63'
-                },
-                labels={'COMPONENT_ID': 'Component Count', 'PATTERN_TYPE': 'Pattern Type'}
-            )
-            
-            st.plotly_chart(fig_patterns, use_container_width=True)
-            
-            # Show specific components with patterns
-            if 'Normal' in anomaly_data['PATTERN_TYPE'].values:
-                patterns_to_show = anomaly_data[anomaly_data['PATTERN_TYPE'] != 'Normal']
-                if not patterns_to_show.empty:
-                    patterns_summary = patterns_to_show.groupby(['COMPONENT_NAME', 'PATTERN_TYPE', 'AIRCRAFT_REGISTRATION']).agg({
-                        'CRITICAL_ANOMALIES': 'sum',
-                        'WARNING_ANOMALIES': 'sum'
-                    }).reset_index()
-                    
-                    st.subheader("Components with Anomaly Patterns")
-                    st.dataframe(
-                        patterns_summary.sort_values('CRITICAL_ANOMALIES', ascending=False),
-                        column_config={
-                            "COMPONENT_NAME": "Component",
-                            "PATTERN_TYPE": "Pattern Type",
-                            "AIRCRAFT_REGISTRATION": "Aircraft",
-                            "CRITICAL_ANOMALIES": st.column_config.NumberColumn("Critical Anomalies", format="%d"),
-                            "WARNING_ANOMALIES": st.column_config.NumberColumn("Warning Anomalies", format="%d")
-                        },
-                        use_container_width=True
-                    )
-                else:
-                    st.info("No components with abnormal patterns in the selected time period.")
-        else:
-            st.warning("Pattern detection data not available for the selected filters.")
-
-    # Display data refresh time
-    if not kpi_data.empty and 'REFRESHED_AT' in kpi_data.columns:
-        st.sidebar.write(f"Data refreshed: {kpi_data['REFRESHED_AT'].iloc[0]}")
+    - Component health tracking and maintenance recommendations
+    - Cost-benefit analysis for each recommended maintenance action
+    - Optimized maintenance schedules specific to their fleet
+    
+    Airlines access this data through their own Snowflake account with strong governance ensuring:
+    - Each airline only sees data relevant to their aircraft
+    - Sensitive component specifications are protected
+    - All data access is tracked and audited
+    """)
+    
+    # Show example of shared views
+    with st.expander("Example of Secure Shared Views for Airlines"):
+        sharing_cols = st.columns(2)
+        
+        with sharing_cols[0]:
+            st.code("""
+-- Air Canada shared view for maintenance schedule
+create or replace secure view airline_shared.air_canada_maintenance_schedule as
+select 
+    component_id,
+    component_name,
+    aircraft_id,
+    aircraft_registration,
+    aircraft_model,
+    component_category,
+    percent_life_used,
+    risk_category,
+    recommended_date,
+    maintenance_type,
+    maintenance_code,
+    duration_hours,
+    technician_count,
+    can_be_bundled,
+    bundled_components_count,
+    bundled_components,
+    bundling_efficiency
+from gold.optimal_maintenance_schedule
+where airline_id = 1002; -- Air Canada's airline_id
+            """, language="sql")
+        
+        with sharing_cols[1]:
+            st.code("""
+-- Air Canada shared view for ROI analysis
+create or replace secure view airline_shared.air_canada_maintenance_roi as
+select
+    component_id,
+    component_name,
+    aircraft_id,
+    aircraft_registration,
+    aircraft_model,
+    component_category,
+    replacement_cost_usd,
+    reactive_maintenance_cost_usd,
+    predictive_maintenance_cost_usd,
+    potential_savings_usd,
+    roi_percentage,
+    estimated_flights_saved,
+    downtime_hours_saved
+from gold.maintenance_roi_analysis
+where airline_id = 1002; -- Air Canada's airline_id
+            """, language="sql")
 
     # Footer
     st.markdown("---")
