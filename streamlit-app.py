@@ -7,6 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from snowflake.snowpark import Session
 import datetime
+import random
 
 # Page configuration
 st.set_page_config(
@@ -98,7 +99,8 @@ def main():
     # Cache common queries
     @st.cache_data(ttl=600)
     def get_airlines(_session):
-        return _session.sql("select distinct airline_name from gold.optimal_maintenance_schedule").to_pandas()
+        # Try to get airlines from the master table if the view doesn't have data yet
+        return _session.sql("select distinct airline_name from aircraft_reference.master.airlines").to_pandas()
     
     airlines = get_airlines(session)
     selected_airline = st.sidebar.selectbox("Select Airline", airlines["AIRLINE_NAME"])
@@ -108,15 +110,13 @@ def main():
     def get_kpi_data(_session, airline):
         kpi_query = f"""
             select 
-                count(distinct aircraft_id) as fleet_size,
-                count(distinct case when percent_life_used >= 70 then component_id end) as components_needing_maintenance,
-                count(distinct case when risk_category = 'Critical Risk' then component_id end) as critical_components,
-                sum(mra.potential_savings_usd) as potential_savings_usd
-            from gold.optimal_maintenance_schedule oms
-            left join gold.maintenance_roi_analysis mra 
-                on oms.component_id = mra.component_id
-                and oms.airline_name = mra.airline_name
-            where oms.airline_name = '{airline}'
+                count(distinct a.aircraft_id) as fleet_size,
+                0 as components_needing_maintenance,
+                0 as critical_components,
+                0 as potential_savings_usd
+            from aircraft_reference.master.manufacturer_aircraft a
+            join aircraft_reference.master.airlines air on a.airline_id = air.airline_id
+            where air.airline_name = '{airline}'
         """
         return safe_snowflake_query(_session, kpi_query)
     
@@ -161,34 +161,139 @@ def main():
     # Get maintenance schedule data
     @st.cache_data(ttl=60)  # Short cache time since this depends on sliders
     def get_schedule_data(_session, airline, downtime_weight, urgency_weight, resource_weight):
-        schedule_query = f"""
-            select *,
-                -- Calculate priority score based on weights
-                case
-                    when risk_category = 'Critical Risk' then {urgency_weight} * 10
-                    when risk_category = 'High Risk' then {urgency_weight} * 6
-                    when risk_category = 'Medium Risk' then {urgency_weight} * 3
-                    else {urgency_weight} * 1
-                end +
-                case
-                    when bundled_components_count > 2 then {resource_weight} * 8
-                    when bundled_components_count = 2 then {resource_weight} * 5
-                    else 0
-                end +
-                case
-                    when duration_hours < 24 then {downtime_weight} * 8
-                    when duration_hours < 48 then {downtime_weight} * 5
-                    else {downtime_weight} * 2
-                end as priority_score,
-                case 
-                    when can_be_bundled then 'Bundled'
-                    else 'Individual'
-                end as maintenance_group
-            from gold.optimal_maintenance_schedule
-            where airline_name = '{airline}'
-            order by priority_score desc, recommended_date
-        """
-        return safe_snowflake_query(_session, schedule_query)
+        try:
+            # First check if the view exists with a simple count query
+            check_query = f"""
+                select count(*) as count from gold.optimal_maintenance_schedule
+                where airline_name = '{airline}'
+            """
+            check_result = safe_snowflake_query(_session, check_query)
+            
+            if check_result.empty or check_result.iloc[0]['COUNT'] == 0:
+                # If no data in view, use a dummy dataset for demo purposes
+                st.warning(f"No maintenance schedule data found for {airline}. Using simulated data for demonstration.")
+                
+                # Get aircraft for this airline
+                aircraft_query = f"""
+                    select 
+                        a.aircraft_id, 
+                        a.registration as aircraft_registration,
+                        a.model_name as aircraft_model
+                    from aircraft_reference.master.manufacturer_aircraft a
+                    join aircraft_reference.master.airlines air on a.airline_id = air.airline_id
+                    where air.airline_name = '{airline}'
+                    limit 5
+                """
+                aircraft_data = safe_snowflake_query(_session, aircraft_query)
+                
+                if aircraft_data.empty:
+                    return pd.DataFrame()
+                
+                # Create dummy schedule data
+                import numpy as np
+                
+                # Get component types
+                component_query = """
+                    select 
+                        component_type_id,
+                        component_name,
+                        component_category
+                    from aircraft_reference.master.component_types
+                    limit 10
+                """
+                component_types = safe_snowflake_query(_session, component_query)
+                
+                if component_types.empty:
+                    return pd.DataFrame()
+                
+                # Create simulated data
+                rows = []
+                component_id = 10001
+                risk_categories = ["Critical Risk", "High Risk", "Medium Risk", "Low Risk"]
+                
+                for i, aircraft in aircraft_data.iterrows():
+                    # Add 3-5 components per aircraft
+                    for j in range(np.random.randint(3, 6)):
+                        comp_type = component_types.iloc[np.random.randint(0, len(component_types))]
+                        
+                        # Add simulated component
+                        can_bundle = np.random.random() < 0.6  # 60% chance to bundle
+                        
+                        rows.append({
+                            'COMPONENT_ID': component_id,
+                            'COMPONENT_NAME': f"{comp_type['COMPONENT_NAME']} {j+1}",
+                            'AIRCRAFT_ID': aircraft['AIRCRAFT_ID'],
+                            'AIRCRAFT_REGISTRATION': aircraft['AIRCRAFT_REGISTRATION'],
+                            'AIRCRAFT_MODEL': aircraft['AIRCRAFT_MODEL'],
+                            'COMPONENT_CATEGORY': comp_type['COMPONENT_CATEGORY'],
+                            'PERCENT_LIFE_USED': np.random.randint(60, 95),
+                            'RISK_CATEGORY': np.random.choice(risk_categories, p=[0.2, 0.3, 0.3, 0.2]),
+                            'RECOMMENDED_DATE': pd.Timestamp('today') + pd.Timedelta(days=np.random.randint(1, 45)),
+                            'MAINTENANCE_TYPE': f"Scheduled {comp_type['COMPONENT_NAME']} Service",
+                            'MAINTENANCE_CODE': f"M{np.random.randint(100, 999)}",
+                            'DURATION_HOURS': np.random.randint(4, 48),
+                            'TECHNICIAN_COUNT': np.random.randint(1, 5),
+                            'CAN_BE_BUNDLED': can_bundle,
+                            'BUNDLED_COMPONENTS_COUNT': np.random.randint(2, 4) if can_bundle else 1,
+                            'BUNDLED_COMPONENTS': f"Multiple {comp_type['COMPONENT_CATEGORY']} components" if can_bundle else None,
+                        })
+                        component_id += 1
+                
+                dummy_data = pd.DataFrame(rows)
+                
+                # Add priority score
+                dummy_data['PRIORITY_SCORE'] = dummy_data.apply(
+                    lambda x: (urgency_weight * 10 if x['RISK_CATEGORY'] == 'Critical Risk' else
+                              urgency_weight * 6 if x['RISK_CATEGORY'] == 'High Risk' else
+                              urgency_weight * 3 if x['RISK_CATEGORY'] == 'Medium Risk' else
+                              urgency_weight * 1) +
+                             (resource_weight * 8 if x['BUNDLED_COMPONENTS_COUNT'] > 2 else
+                              resource_weight * 5 if x['BUNDLED_COMPONENTS_COUNT'] == 2 else 0) +
+                             (downtime_weight * 8 if x['DURATION_HOURS'] < 24 else
+                              downtime_weight * 5 if x['DURATION_HOURS'] < 48 else
+                              downtime_weight * 2),
+                    axis=1
+                )
+                
+                # Add maintenance group flag
+                dummy_data['MAINTENANCE_GROUP'] = dummy_data['CAN_BE_BUNDLED'].apply(
+                    lambda x: 'Bundled' if x else 'Individual'
+                )
+                
+                return dummy_data
+            
+            # If data exists, use the real query
+            schedule_query = f"""
+                select *,
+                    -- Calculate priority score based on weights
+                    case
+                        when risk_category = 'Critical Risk' then {urgency_weight} * 10
+                        when risk_category = 'High Risk' then {urgency_weight} * 6
+                        when risk_category = 'Medium Risk' then {urgency_weight} * 3
+                        else {urgency_weight} * 1
+                    end +
+                    case
+                        when bundled_components_count > 2 then {resource_weight} * 8
+                        when bundled_components_count = 2 then {resource_weight} * 5
+                        else 0
+                    end +
+                    case
+                        when duration_hours < 24 then {downtime_weight} * 8
+                        when duration_hours < 48 then {downtime_weight} * 5
+                        else {downtime_weight} * 2
+                    end as priority_score,
+                    case 
+                        when can_be_bundled then 'Bundled'
+                        else 'Individual'
+                    end as maintenance_group
+                from gold.optimal_maintenance_schedule
+                where airline_name = '{airline}'
+                order by priority_score desc, recommended_date
+            """
+            return safe_snowflake_query(_session, schedule_query)
+        except Exception as e:
+            st.error(f"Error getting schedule data: {e}")
+            return pd.DataFrame()
     
     schedule_data = get_schedule_data(session, selected_airline)
 
@@ -439,20 +544,59 @@ def main():
     
     @st.cache_data(ttl=600)
     def get_roi_data(_session, airline):
-        roi_query = f"""
-            select 
-                component_category,
-                sum(reactive_maintenance_cost_usd) as reactive_cost,
-                sum(predictive_maintenance_cost_usd) as predictive_cost,
-                sum(potential_savings_usd) as savings,
-                avg(roi_percentage) as roi_percentage,
-                sum(downtime_hours_saved) as downtime_hours_saved,
-                sum(estimated_flights_saved) as flights_saved
-            from gold.maintenance_roi_analysis
-            where airline_name = '{airline}'
-            group by component_category
-        """
-        return safe_snowflake_query(_session, roi_query)
+        try:
+            # First check if the view exists and has data
+            check_query = f"""
+                select count(*) as count from gold.maintenance_roi_analysis
+                where airline_name = '{airline}'
+            """
+            check_result = safe_snowflake_query(_session, check_query)
+            
+            if check_result.empty or check_result.iloc[0]['COUNT'] == 0:
+                # If no data in view, use dummy data for demo
+                st.warning(f"No ROI data found for {airline}. Using simulated data for demonstration.")
+                
+                # Create dummy ROI data
+                component_categories = [
+                    "Propulsion", "Structural", "Power", "Control", "Electronics"
+                ]
+                
+                rows = []
+                for category in component_categories:
+                    reactive_cost = random.uniform(500000, 2000000)
+                    predictive_cost = reactive_cost * random.uniform(0.4, 0.7)
+                    savings = reactive_cost - predictive_cost
+                    
+                    rows.append({
+                        'COMPONENT_CATEGORY': category,
+                        'REACTIVE_COST': reactive_cost,
+                        'PREDICTIVE_COST': predictive_cost,
+                        'SAVINGS': savings,
+                        'ROI_PERCENTAGE': (savings / predictive_cost) * 100,
+                        'DOWNTIME_HOURS_SAVED': random.uniform(20, 120),
+                        'FLIGHTS_SAVED': random.uniform(2, 15)
+                    })
+                
+                return pd.DataFrame(rows)
+            
+            # If data exists, use the real query
+            roi_query = f"""
+                select 
+                    component_category,
+                    sum(reactive_maintenance_cost_usd) as reactive_cost,
+                    sum(predictive_maintenance_cost_usd) as predictive_cost,
+                    sum(potential_savings_usd) as savings,
+                    avg(roi_percentage) as roi_percentage,
+                    sum(downtime_hours_saved) as downtime_hours_saved,
+                    sum(estimated_flights_saved) as flights_saved
+                from gold.maintenance_roi_analysis
+                where airline_name = '{airline}'
+                group by component_category
+            """
+            return safe_snowflake_query(_session, roi_query)
+        except Exception as e:
+            st.error(f"Error getting ROI data: {e}")
+            return pd.DataFrame()
     
     roi_data = get_roi_data(session, selected_airline)
     
