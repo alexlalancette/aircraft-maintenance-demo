@@ -114,8 +114,8 @@ def main():
     
     # Cache common queries
     @st.cache_data(ttl=600)
-    def get_airlines(session):
-        return session.table("platinum.airline_dashboard_kpis").select("airline_name").to_pandas()
+    def get_airlines(_session):
+        return _session.table("platinum.airline_dashboard_kpis").select("airline_name").to_pandas()
     
     airlines = get_airlines(session)
     selected_airline = st.sidebar.selectbox("Select Airline", airlines["AIRLINE_NAME"])
@@ -135,12 +135,12 @@ def main():
     st.header("Fleet Health Overview")
     
     @st.cache_data(ttl=600)
-    def get_kpi_data(session, airline):
+    def get_kpi_data(_session, airline):
         kpi_query = f"""
             SELECT * FROM platinum.airline_dashboard_kpis
             WHERE airline_name = '{airline}'
         """
-        return safe_snowflake_query(session, kpi_query)
+        return safe_snowflake_query(_session, kpi_query)
     
     kpi_data = get_kpi_data(session, selected_airline)
 
@@ -159,7 +159,7 @@ def main():
     st.header("Fleet Health Status")
     
     @st.cache_data(ttl=600)
-    def get_fleet_data(session, airline):
+    def get_fleet_data(_session, airline):
         fleet_query = f"""
             SELECT aircraft_registration, aircraft_model, health_score, aircraft_health_status,
                 critical_components, warning_components, average_component_wear
@@ -167,7 +167,7 @@ def main():
             WHERE airline_name = '{airline}'
             ORDER BY health_score
         """
-        return safe_snowflake_query(session, fleet_query)
+        return safe_snowflake_query(_session, fleet_query)
     
     fleet_data = get_fleet_data(session, selected_airline)
 
@@ -199,7 +199,7 @@ def main():
     )
     
     @st.cache_data(ttl=600)
-    def get_risk_data(session, airline, component_filter):
+    def get_risk_data(_session, airline, component_filter):
         # Enhanced query for risk matrix
         risk_query = f"""
             SELECT 
@@ -230,7 +230,7 @@ def main():
             {f"AND crs.component_name LIKE '%{component_filter}%'" if component_filter != "All" else ""}
             ORDER BY risk_score DESC
         """
-        return safe_snowflake_query(session, risk_query)
+        return safe_snowflake_query(_session, risk_query)
     
     risk_data = get_risk_data(session, selected_airline, component_filter)
     
@@ -333,7 +333,7 @@ def main():
     st.header("Maintenance ROI & Cost Savings Analysis")
 
     @st.cache_data(ttl=600)
-    def get_cost_data(session, airline):
+    def get_cost_data(_session, airline):
         # Get more detailed cost data with time dimension
         cost_query = f"""
             SELECT
@@ -355,7 +355,7 @@ def main():
             GROUP BY 1, 3
             ORDER BY 1, 3
         """
-        return safe_snowflake_query(session, cost_query)
+        return safe_snowflake_query(_session, cost_query)
     
     cost_data = get_cost_data(session, selected_airline)
     
@@ -465,7 +465,7 @@ def main():
 
     # Call the stored procedure to get an optimized maintenance schedule
     @st.cache_data(ttl=60)  # Short cache time since this depends on sliders
-    def get_schedule_data(session, airline, downtime_weight, urgency_weight, resource_weight):
+    def get_schedule_data(_session, airline, downtime_weight, urgency_weight, resource_weight):
         schedule_query = f"""
             CALL platinum.generate_optimized_maintenance_schedule(
                 '{airline}',
@@ -474,7 +474,7 @@ def main():
                 {resource_weight}
             )
         """
-        return safe_snowflake_query(session, schedule_query)
+        return safe_snowflake_query(_session, schedule_query)
     
     schedule_data = get_schedule_data(session, selected_airline, downtime_weight, urgency_weight, resource_weight)
 
@@ -630,7 +630,7 @@ def main():
 
     # Query for anomaly data with enhanced fields
     @st.cache_data(ttl=600)
-    def get_anomaly_data(session, airline, from_date, component_type, sensor_type):
+    def get_anomaly_data(_session, airline, from_date, component_type, sensor_type):
         anomaly_query = f"""
             WITH base_data AS (
                 SELECT 
@@ -676,7 +676,7 @@ def main():
             SELECT * FROM base_data
             ORDER BY reading_date
         """
-        return safe_snowflake_query(session, anomaly_query)
+        return safe_snowflake_query(_session, anomaly_query)
     
     anomaly_data = get_anomaly_data(session, selected_airline, from_date, component_type, sensor_type)
 
