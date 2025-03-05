@@ -98,7 +98,7 @@ def main():
     # Cache common queries
     @st.cache_data(ttl=600)
     def get_airlines(_session):
-        return _session.sql("select distinct airline_name from master_data.airlines").to_pandas()
+        return _session.sql("select distinct airline_name from gold.optimal_maintenance_schedule").to_pandas()
     
     airlines = get_airlines(session)
     selected_airline = st.sidebar.selectbox("Select Airline", airlines["AIRLINE_NAME"])
@@ -108,15 +108,15 @@ def main():
     def get_kpi_data(_session, airline):
         kpi_query = f"""
             select 
-                count(distinct a.aircraft_id) as fleet_size,
-                count(distinct case when oms.percent_life_used >= 70 then oms.component_id end) as components_needing_maintenance,
-                count(distinct case when oms.risk_category = 'Critical Risk' then oms.component_id end) as critical_components,
+                count(distinct aircraft_id) as fleet_size,
+                count(distinct case when percent_life_used >= 70 then component_id end) as components_needing_maintenance,
+                count(distinct case when risk_category = 'Critical Risk' then component_id end) as critical_components,
                 sum(mra.potential_savings_usd) as potential_savings_usd
-            from master_data.manufacturer_aircraft a
-            join master_data.airlines air on a.airline_id = air.airline_id
-            left join gold.optimal_maintenance_schedule oms on a.aircraft_id = oms.aircraft_id
-            left join gold.maintenance_roi_analysis mra on oms.component_id = mra.component_id
-            where air.airline_name = '{airline}'
+            from gold.optimal_maintenance_schedule oms
+            left join gold.maintenance_roi_analysis mra 
+                on oms.component_id = mra.component_id
+                and oms.airline_name = mra.airline_name
+            where oms.airline_name = '{airline}'
         """
         return safe_snowflake_query(_session, kpi_query)
     
@@ -160,30 +160,10 @@ def main():
 
     # Get maintenance schedule data
     @st.cache_data(ttl=60)  # Short cache time since this depends on sliders
-    def get_schedule_data(_session, airline):
+    def get_schedule_data(_session, airline, downtime_weight, urgency_weight, resource_weight):
         schedule_query = f"""
-            select 
-                component_id,
-                component_name,
-                aircraft_id,
-                aircraft_registration,
-                aircraft_model,
-                component_category,
-                percent_life_used,
-                risk_category,
-                recommended_date,
-                maintenance_type,
-                maintenance_code,
-                duration_hours,
-                technician_count,
-                can_be_bundled,
-                bundled_components_count,
-                bundled_components,
-                case 
-                    when can_be_bundled then 'Bundled'
-                    else 'Individual'
-                end as maintenance_group,
-                -- Apply optimization weights
+            select *,
+                -- Calculate priority score based on weights
                 case
                     when risk_category = 'Critical Risk' then {urgency_weight} * 10
                     when risk_category = 'High Risk' then {urgency_weight} * 6
@@ -199,7 +179,11 @@ def main():
                     when duration_hours < 24 then {downtime_weight} * 8
                     when duration_hours < 48 then {downtime_weight} * 5
                     else {downtime_weight} * 2
-                end as priority_score
+                end as priority_score,
+                case 
+                    when can_be_bundled then 'Bundled'
+                    else 'Individual'
+                end as maintenance_group
             from gold.optimal_maintenance_schedule
             where airline_name = '{airline}'
             order by priority_score desc, recommended_date
@@ -568,73 +552,6 @@ def main():
                 st.metric("Potential Flights Saved", f"{total_flights_saved:,.1f}")
         else:
             st.warning("No impact data available for selected airline.")
-
-    # Data Sharing Information
-    st.header("Secure Data Sharing with Airlines")
-    st.markdown("""
-    This dashboard leverages Snowflake's secure data sharing capabilities to provide airlines with:
-    
-    - Component health tracking and maintenance recommendations
-    - Cost-benefit analysis for each recommended maintenance action
-    - Optimized maintenance schedules specific to their fleet
-    
-    Airlines access this data through their own Snowflake account with strong governance ensuring:
-    - Each airline only sees data relevant to their aircraft
-    - Sensitive component specifications are protected
-    - All data access is tracked and audited
-    """)
-    
-    # Show example of shared views
-    with st.expander("Example of Secure Shared Views for Airlines"):
-        sharing_cols = st.columns(2)
-        
-        with sharing_cols[0]:
-            st.code("""
--- Air Canada shared view for maintenance schedule
-create or replace secure view airline_shared.air_canada_maintenance_schedule as
-select 
-    component_id,
-    component_name,
-    aircraft_id,
-    aircraft_registration,
-    aircraft_model,
-    component_category,
-    percent_life_used,
-    risk_category,
-    recommended_date,
-    maintenance_type,
-    maintenance_code,
-    duration_hours,
-    technician_count,
-    can_be_bundled,
-    bundled_components_count,
-    bundled_components,
-    bundling_efficiency
-from gold.optimal_maintenance_schedule
-where airline_id = 1002; -- Air Canada's airline_id
-            """, language="sql")
-        
-        with sharing_cols[1]:
-            st.code("""
--- Air Canada shared view for ROI analysis
-create or replace secure view airline_shared.air_canada_maintenance_roi as
-select
-    component_id,
-    component_name,
-    aircraft_id,
-    aircraft_registration,
-    aircraft_model,
-    component_category,
-    replacement_cost_usd,
-    reactive_maintenance_cost_usd,
-    predictive_maintenance_cost_usd,
-    potential_savings_usd,
-    roi_percentage,
-    estimated_flights_saved,
-    downtime_hours_saved
-from gold.maintenance_roi_analysis
-where airline_id = 1002; -- Air Canada's airline_id
-            """, language="sql")
 
     # Footer
     st.markdown("---")
